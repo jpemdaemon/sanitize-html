@@ -1,18 +1,26 @@
 {
-  "name": "sanitize-html",
-  "version": "2.17.1",
-  "description": "Clean up user-submitted HTML, preserving allowlisted elements and allowlisted attributes on a per-element basis",
-  "sideEffects": false,
+  "name": "@mdaemon/sanitize-html",
+  "version": "2.17.2",
+  "description": "A fork of sanitize-html with some modifications for use in MDaemon",
   "main": "index.js",
+  "browser": "dist/sanitize-html.umd.js",
+  "module": "dist/sanitize-html.es.js",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
-    "index.js"
+    "index.js",
+    "dist/"
   ],
   "scripts": {
-    "test": "npx eslint . && mocha test/test.js"
+    "test": "npx eslint ./index.js && mocha test/test.js",
+    "build": "vite build",
+    "build:dev": "vite build --config vite.config.dev.js",
+    "preview": "vite preview"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/apostrophecms/sanitize-html.git"
+    "url": "git+https://github.com/jpemdaemon/sanitize-html.git"
   },
   "keywords": [
     "html",
@@ -31,6 +39,8 @@
     "postcss": "^8.5.6"
   },
   "devDependencies": {
+    "@rollup/plugin-commonjs": "^28.0.6",
+    "@rollup/plugin-node-resolve": "^16.0.1",
     "eslint": "^7.3.1",
     "eslint-config-apostrophe": "^3.4.0",
     "eslint-config-standard": "^14.1.1",
@@ -39,6 +49,7 @@
     "eslint-plugin-promise": "^4.2.1",
     "eslint-plugin-standard": "^4.0.1",
     "mocha": "^10.2.0",
-    "sinon": "^9.0.2"
+    "sinon": "^9.0.2",
+    "vite": "^7.1.5"
   }
 }

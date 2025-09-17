@@ -5,3 +5,6 @@ node_modules
 .idea
 # We do not commit CSS, only LESS
 public/css/*.css
+
+# Keep dist directory for browser builds but ignore temp files
+dist/*.dev.*

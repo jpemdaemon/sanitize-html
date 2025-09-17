@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Minified Build</title>
+</head>
+<body>
+    <h1>Test Minified Build</h1>
+    
+    <div>
+        <h2>Input HTML:</h2>
+        <textarea id="input" style="width: 100%; height: 100px;">
+&lt;p&gt;Hello &lt;script&gt;alert('xss')&lt;/script&gt; &lt;strong&gt;world&lt;/strong&gt;!&lt;/p&gt;
+&lt;img src="x" onerror="alert('xss')" alt="test"&gt;
+        </textarea>
+    </div>
+    
+    <div>
+        <h2>Sanitized Output:</h2>
+        <div id="output" style="border: 1px solid #ccc; padding: 10px; min-height: 50px;">
+        </div>
+    </div>
+    
+    <div>
+        <h2>Raw Sanitized HTML:</h2>
+        <pre id="raw" style="background: #f5f5f5; padding: 10px; white-space: pre-wrap;">
+        </pre>
+    </div>
+    
+    <div>
+        <h2>Error Log:</h2>
+        <pre id="error" style="background: #ffe6e6; padding: 10px; color: red;">
+        </pre>
+    </div>
+    
+    <button onclick="testSanitize()">Test Sanitize</button>
+    
+    <!-- Load the minified UMD bundle -->
+    <script src="dist/sanitize-html.umd.js"></script>
+    
+    <script>
+        function testSanitize() {
+            const errorEl = document.getElementById('error');
+            errorEl.textContent = '';
+            
+            try {
+                const input = document.getElementById('input').value;
+                
+                // Test that sanitizeHtml is available globally
+                if (typeof sanitizeHtml === 'undefined') {
+                    throw new Error('sanitizeHtml is not available globally!');
+                }
+                
+                console.log('sanitizeHtml function:', sanitizeHtml);
+                
+                // Sanitize the HTML
+                const cleaned = sanitizeHtml(input);
+                
+                // Display results
+                document.getElementById('output').innerHTML = cleaned;
+                document.getElementById('raw').textContent = cleaned;
+                
+                console.log('Success! Cleaned HTML:', cleaned);
+                
+            } catch (error) {
+                console.error('Error during sanitization:', error);
+                errorEl.textContent = 'Error: ' + error.message + '\nStack: ' + error.stack;
+            }
+        }
+        
+        // Run initial test on page load
+        window.onload = function() {
+            testSanitize();
+        };
+        
+        // Also capture any global errors
+        window.onerror = function(msg, url, line, col, error) {
+            document.getElementById('error').textContent = 'Global Error: ' + msg + ' at ' + line + ':' + col;
+            return false;
+        };
+    </script>
+</body>
+</html>

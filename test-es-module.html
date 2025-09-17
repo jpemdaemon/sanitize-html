@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sanitize HTML ES Module Test</title>
+</head>
+<body>
+    <h1>Sanitize HTML ES Module Test</h1>
+    
+    <div>
+        <h2>Input HTML:</h2>
+        <textarea id="input" style="width: 100%; height: 100px;">
+&lt;p&gt;Hello &lt;script&gt;alert('xss')&lt;/script&gt; &lt;strong&gt;world&lt;/strong&gt;!&lt;/p&gt;
+&lt;img src="x" onerror="alert('xss')" alt="test"&gt;
+&lt;a href="javascript:alert('xss')"&gt;Click me&lt;/a&gt;
+        </textarea>
+    </div>
+    
+    <div>
+        <h2>Sanitized Output:</h2>
+        <div id="output" style="border: 1px solid #ccc; padding: 10px; min-height: 50px;">
+        </div>
+    </div>
+    
+    <div>
+        <h2>Raw Sanitized HTML:</h2>
+        <pre id="raw" style="background: #f5f5f5; padding: 10px; white-space: pre-wrap;">
+        </pre>
+    </div>
+    
+    <button onclick="sanitizeInput()">Sanitize HTML</button>
+    
+    <script type="module">
+        import sanitizeHtml from './dist/sanitize-html.es.js';
+        
+        window.sanitizeInput = function() {
+            const input = document.getElementById('input').value;
+            
+            // Sanitize the HTML
+            const cleaned = sanitizeHtml(input);
+            
+            // Display results
+            document.getElementById('output').innerHTML = cleaned;
+            document.getElementById('raw').textContent = cleaned;
+        };
+        
+        // Run initial sanitization on page load
+        window.addEventListener('load', function() {
+            window.sanitizeInput();
+        });
+    </script>
+</body>
+</html>
