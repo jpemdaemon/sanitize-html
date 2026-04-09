@@ -1,8 +1,9 @@
 {
   "name": "@mdaemon/sanitize-html",
-  "version": "2.17.2",
+  "version": "2.17.3",
   "description": "A fork of sanitize-html with some modifications for use in MDaemon",
   "main": "index.js",
+  "types": "index.d.ts",
   "browser": "dist/sanitize-html.umd.js",
   "module": "dist/sanitize-html.es.js",
   "publishConfig": {
@@ -10,6 +11,7 @@
   },
   "files": [
     "index.js",
+    "index.d.ts",
     "dist/"
   ],
   "scripts": {
