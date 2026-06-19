@@ -1,6 +1,6 @@
 {
   "name": "@mdaemon/sanitize-html",
-  "version": "2.17.3",
+  "version": "2.17.5",
   "description": "A fork of sanitize-html with some modifications for use in MDaemon",
   "main": "index.js",
   "types": "index.d.ts",
@@ -35,8 +35,9 @@
   "dependencies": {
     "deepmerge": "^4.2.2",
     "escape-string-regexp": "^4.0.0",
-    "htmlparser2": "^8.0.0",
+    "htmlparser2": "^10.1.0",
     "is-plain-object": "^5.0.0",
+    "launder": "^1.7.1",
     "parse-srcset": "^1.0.2",
     "postcss": "^8.5.6"
   },

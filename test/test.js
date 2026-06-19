@@ -23,6 +23,18 @@ describe('sanitizeHtml', function() {
   it('should pass through simple, well-formed markup', function() {
     assert.equal(sanitizeHtml('<div><p>Hello <b>there</b></p></div>'), '<div><p>Hello <b>there</b></p></div>');
   });
+  it('should preserve col as a self closing tag', function() {
+    assert.equal(
+      sanitizeHtml(
+        '<table><colgroup><col span="2"></colgroup></table>',
+        {
+          allowedTags: false,
+          allowedAttributes: false
+        }
+      ),
+      '<table><colgroup><col span="2" /></colgroup></table>'
+    );
+  });
   it('should not pass through any text outside html tag boundary since html tag is found and option is ON', function() {
     assert.equal(sanitizeHtml('Text before html tag<html><div><p>Hello <b>there</b></p></div></html>Text after html tag!P�X��[<p>paragraph after closing html</p>', {
       enforceHtmlBoundary: true
@@ -123,6 +135,15 @@ describe('sanitizeHtml', function() {
   it('should drop the content of textarea elements but keep the closing parent tag, when nested', function() {
     assert.equal(sanitizeHtml('<p>Paragraph<textarea>Nifty</textarea></p>'), '<p>Paragraph</p>');
   });
+  it('should drop the content of disallowed xmp elements rather than re-emit it as live markup', function() {
+    // Regression test for GHSA-rpr9-rxv7-x643: htmlparser2 parses the contents
+    // of <xmp> as raw text, so without xmp in nonTextTags the inner markup
+    // would be re-emitted unescaped and become live HTML.
+    assert.equal(sanitizeHtml('<xmp><script>alert(1)</script></xmp>'), '');
+    assert.equal(sanitizeHtml('<xmp><img src=x onerror=alert(1)></xmp>'), '');
+    assert.equal(sanitizeHtml('<xmp><svg><script>alert(1)</script></svg></xmp>'), '');
+    assert.equal(sanitizeHtml('before<xmp><script>alert(1)</script></xmp>after'), 'beforeafter');
+  });
   it('should retain the content of fibble elements by default', function() {
     assert.equal(sanitizeHtml('<fibble>Nifty</fibble><p>Paragraph</p>'), 'Nifty<p>Paragraph</p>');
   });
@@ -179,11 +200,14 @@ describe('sanitizeHtml', function() {
     assert.equal(sanitizeHtml('<a href="java\0&#14;\t\r\n script:alert(\'foo\')">Hax</a>'), '<a>Hax</a>');
   });
   it('should dump character codes 1-32 even when escaped with padding rather than trailing ;', function() {
-    assert.equal(sanitizeHtml('<a href="java&#0000001script:alert(\'foo\')">Hax</a>'), '<a href="java&amp;#0000001script:alert(\'foo\')">Hax</a>');
-    // This one is weird, but the browser does not interpret it
-    // as a scheme, so we're OK. That character is 65535, not null. I
-    // think it's a limitation of the entities module
-    assert.equal(sanitizeHtml('<a href="java&#0000000script:alert(\'foo\')">Hax</a>'), '<a href="java&amp;#0000000script:alert(\'foo\')">Hax</a>');
+    // htmlparser2 10.x correctly decodes zero-padded numeric entities.
+    // &#0000001 decodes to U+0001, which is stripped as a control char,
+    // revealing the javascript: scheme
+    assert.equal(sanitizeHtml('<a href="java&#0000001script:alert(\'foo\')">Hax</a>'), '<a>Hax</a>');
+    // &#0000000 decodes to U+FFFD (replacement character per HTML spec),
+    // which is not a control char, so the URL is preserved safely since
+    // browsers don't interpret java�script: as javascript:
+    assert.equal(sanitizeHtml('<a href="java&#0000000script:alert(\'foo\')">Hax</a>'), '<a href="java\uFFFDscript:alert(\'foo\')">Hax</a>');
   });
   it('should still like nice schemes', function() {
     assert.equal(sanitizeHtml('<a href="http://google.com/">Hi</a>'), '<a href="http://google.com/">Hi</a>');
@@ -220,7 +244,7 @@ describe('sanitizeHtml', function() {
           attribs.bar = 'bar';
           return {
             tagName: 'ul',
-            attribs: attribs
+            attribs
           };
         }
       },
@@ -233,8 +257,8 @@ describe('sanitizeHtml', function() {
       transformTags: {
         a: function (tagName, attribs) {
           return {
-            tagName: tagName,
-            attribs: attribs,
+            tagName,
+            attribs,
             text: ''
           };
         }
@@ -246,8 +270,8 @@ describe('sanitizeHtml', function() {
       transformTags: {
         a: function (tagName, attribs) {
           return {
-            tagName: tagName,
-            attribs: attribs,
+            tagName,
+            attribs,
             text: 'some text need"to<be>filtered'
           };
         }
@@ -263,8 +287,8 @@ describe('sanitizeHtml', function() {
       transformTags: {
         a: function (tagName, attribs) {
           return {
-            tagName: tagName,
-            attribs: attribs,
+            tagName,
+            attribs,
             text: 'some good text'
           };
         }
@@ -290,8 +314,8 @@ describe('sanitizeHtml', function() {
       transformTags: {
         a: function (tagName, attribs) {
           return {
-            tagName: tagName,
-            attribs: attribs,
+            tagName,
+            attribs,
             text: 'some new text'
           };
         }
@@ -304,8 +328,8 @@ describe('sanitizeHtml', function() {
       transformTags: {
         a: function (tagName, attribs) {
           return {
-            tagName: tagName,
-            attribs: attribs
+            tagName,
+            attribs
           };
         }
       }
@@ -362,7 +386,7 @@ describe('sanitizeHtml', function() {
       allowedTags: sanitizeHtml.defaults.allowedTags.concat([ 'img' ]),
       exclusiveFilter: function(frame) {
         if (frame.tag === 'a') {
-          // eslint-disable-next-line no-console
+
           assert(frame.mediaChildren.length === 1);
         }
 
@@ -655,6 +679,7 @@ describe('sanitizeHtml', function() {
 
     assert(spy.calledWith(message));
     // Restore the spied-upon method
+    /* eslint-disable-next-line no-console */
     console.warn.restore();
   });
 
@@ -671,6 +696,7 @@ describe('sanitizeHtml', function() {
 
     assert(spy.notCalled);
     // Restore the spied-upon method
+    /* eslint-disable-next-line no-console */
     console.warn.restore();
   });
 
@@ -701,7 +727,7 @@ describe('sanitizeHtml', function() {
                 return false;
               }
               return {
-                tagName: tagName,
+                tagName,
                 attribs: {
                   target: '_blank',
                   href: attribs.href
@@ -730,7 +756,7 @@ describe('sanitizeHtml', function() {
                 return false;
               }
               return {
-                tagName: tagName,
+                tagName,
                 attribs: {
                   target: '_blank',
                   href: attribs.href
@@ -756,7 +782,7 @@ describe('sanitizeHtml', function() {
           transformTags: {
             '*': function (tagName, attribs) {
               return {
-                tagName: tagName,
+                tagName,
                 attribs: {
                   style: 'text-align: center'
                 }
@@ -876,6 +902,13 @@ describe('sanitizeHtml', function() {
       ), '!<textarea>&lt;/textarea&gt;&lt;svg/onload=prompt`xs`&gt;</textarea>!'
     );
   });
+  it('should not double-encode entities inside an allowed textarea element', function() {
+    assert.equal(
+      sanitizeHtml('<textarea>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</textarea>',
+        { allowedTags: [ 'textarea' ] }
+      ), '<textarea>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</textarea>'
+    );
+  });
   it('should allow protocol relative links by default', function() {
     assert.equal(
       sanitizeHtml('<a href="//cnn.com/example">test</a>'),
@@ -946,6 +979,98 @@ describe('sanitizeHtml', function() {
         allowedAttributes: { img: [ 'src', 'srcset' ] }
       }),
       '<img src="fallback.jpg" srcset="/upload/f_auto,q_auto:eco,c_fit,w_1460,h_2191/abc.jpg 1460w, /upload/f_auto,q_auto:eco,c_fit,w_1360,h_2041/abc.jpg" />'
+    );
+  });
+  it('should drop javascript: in form action', function() {
+    assert.equal(
+      sanitizeHtml('<form action="javascript:alert(1)"><button>x</button></form>', {
+        allowedTags: [ 'form', 'button' ],
+        allowedAttributes: { form: [ 'action' ] }
+      }),
+      '<form><button>x</button></form>'
+    );
+  });
+  it('should allow http(s) in form action', function() {
+    assert.equal(
+      sanitizeHtml('<form action="https://example.com/submit"><button>x</button></form>', {
+        allowedTags: [ 'form', 'button' ],
+        allowedAttributes: { form: [ 'action' ] }
+      }),
+      '<form action="https://example.com/submit"><button>x</button></form>'
+    );
+  });
+  it('should drop javascript: in button formaction', function() {
+    assert.equal(
+      sanitizeHtml('<button formaction="javascript:alert(1)">x</button>', {
+        allowedTags: [ 'button' ],
+        allowedAttributes: { button: [ 'formaction' ] }
+      }),
+      '<button>x</button>'
+    );
+  });
+  it('should allow http(s) in button formaction', function() {
+    assert.equal(
+      sanitizeHtml('<button formaction="https://example.com/submit">x</button>', {
+        allowedTags: [ 'button' ],
+        allowedAttributes: { button: [ 'formaction' ] }
+      }),
+      '<button formaction="https://example.com/submit">x</button>'
+    );
+  });
+  it('should drop javascript: in object data', function() {
+    assert.equal(
+      sanitizeHtml('<object data="javascript:alert(1)"></object>', {
+        allowedTags: [ 'object' ],
+        allowedAttributes: { object: [ 'data' ] }
+      }),
+      '<object></object>'
+    );
+  });
+  it('should allow http(s) in object data', function() {
+    assert.equal(
+      sanitizeHtml('<object data="https://example.com/file.pdf"></object>', {
+        allowedTags: [ 'object' ],
+        allowedAttributes: { object: [ 'data' ] }
+      }),
+      '<object data="https://example.com/file.pdf"></object>'
+    );
+  });
+  it('should drop javascript: in SVG xlink:href', function() {
+    assert.equal(
+      sanitizeHtml('<svg><a xlink:href="javascript:alert(1)"><text>x</text></a></svg>', {
+        allowedTags: [ 'svg', 'a', 'text' ],
+        allowedAttributes: { a: [ 'xlink:href' ] }
+      }),
+      '<svg><a><text>x</text></a></svg>'
+    );
+  });
+  it('should allow http(s) in SVG xlink:href', function() {
+    assert.equal(
+      sanitizeHtml('<svg><a xlink:href="https://example.com/"><text>x</text></a></svg>', {
+        allowedTags: [ 'svg', 'a', 'text' ],
+        allowedAttributes: { a: [ 'xlink:href' ] }
+      }),
+      '<svg><a xlink:href="https://example.com/"><text>x</text></a></svg>'
+    );
+  });
+  it('should drop bogus imagesrcset', function() {
+    assert.equal(
+      sanitizeHtml('<link rel="preload" as="image" imagesrcset="foo.jpg 1x, javascript:alert(1) 2x" />', {
+        allowedTags: [ 'link' ],
+        allowedAttributes: { link: [ 'rel', 'as', 'imagesrcset' ] },
+        selfClosing: [ 'link' ]
+      }),
+      '<link rel="preload" as="image" imagesrcset="foo.jpg 1x" />'
+    );
+  });
+  it('should accept valid imagesrcset', function() {
+    assert.equal(
+      sanitizeHtml('<link rel="preload" as="image" imagesrcset="foo.jpg 1x, bar.jpg 2x" />', {
+        allowedTags: [ 'link' ],
+        allowedAttributes: { link: [ 'rel', 'as', 'imagesrcset' ] },
+        selfClosing: [ 'link' ]
+      }),
+      '<link rel="preload" as="image" imagesrcset="foo.jpg 1x, bar.jpg 2x" />'
     );
   });
 
@@ -1454,7 +1579,8 @@ describe('sanitizeHtml', function() {
   // strictly valid pass, at which point decodeEntities: false is safe
   // to use.
   //
-  // it('Should not pass through &0; (a bogus entity) unescaped if decodeEntities is false', function() {
+  // it('Should not pass through &0;
+  // (a bogus entity) unescaped if decodeEntities is false', function() {
   //   assert.equal(sanitizeHtml(
   //     '<img src="<0&0;0.2&" />', {
   //       allowedTags: ['img'],
@@ -1649,6 +1775,41 @@ describe('sanitizeHtml', function() {
     assert.equal(sanitizeHtml('<test>Hello', {
       disallowedTagsMode: 'discard'
     }), 'Hello');
+  });
+  it('should escape unclosed tags without closing bracket in escape mode', function() {
+    assert.equal(sanitizeHtml('<hello', {
+      disallowedTagsMode: 'escape'
+    }), '&lt;hello');
+  });
+  it('should escape unclosed tags without closing bracket in recursiveEscape mode', function() {
+    assert.equal(sanitizeHtml('<hello', {
+      disallowedTagsMode: 'recursiveEscape'
+    }), '&lt;hello');
+  });
+  it('should escape unclosed tags with attributes but no closing bracket in escape mode', function() {
+    assert.equal(sanitizeHtml('<hello you', {
+      disallowedTagsMode: 'escape'
+    }), '&lt;hello you');
+  });
+  it('should escape unclosed tags with attributes but no closing bracket in recursiveEscape mode', function() {
+    assert.equal(sanitizeHtml('<hello you', {
+      disallowedTagsMode: 'recursiveEscape'
+    }), '&lt;hello you');
+  });
+  it('should discard unclosed tags without closing bracket in discard mode', function() {
+    assert.equal(sanitizeHtml('<hello', {
+      disallowedTagsMode: 'discard'
+    }), '');
+  });
+  it('should escape text followed by unclosed tag in escape mode', function() {
+    assert.equal(sanitizeHtml('Hello <world', {
+      disallowedTagsMode: 'escape'
+    }), 'Hello &lt;world');
+  });
+  it('should escape text followed by unclosed tag in recursiveEscape mode', function() {
+    assert.equal(sanitizeHtml('Hello <world', {
+      disallowedTagsMode: 'recursiveEscape'
+    }), 'Hello &lt;world');
   });
   it('should remove non-boolean attributes that are empty', function() {
     assert.equal(sanitizeHtml('<a href target="_blank">hello</a>', {
@@ -1847,5 +2008,87 @@ describe('sanitizeHtml', function() {
     });
 
     assert.equal(sanitizedHtmlPreservedAttrsTrue, sanitizedHtmlPreservedAttrsFalse);
+  });
+  it('should not allow script tag injection via escaped entities in option tag', () => {
+    const inputHtml = '<option>&lt;script&gt;alert(1)&lt;/script&gt;</option>';
+    const result = sanitizeHtml(inputHtml, { allowedTags: ['option'] });
+    assert.strictEqual(result, '<option>&lt;script&gt;alert(1)&lt;/script&gt;</option>');
+  });
+  it('should not double-encode entities inside an allowed option element', function() {
+    assert.equal(
+      sanitizeHtml('<option>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</option>',
+        { allowedTags: [ 'option' ] }
+      ), '<option>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</option>'
+    );
+  });
+  it('should not double-encode entities inside an allowed xmp element', function() {
+    assert.equal(
+      sanitizeHtml('<xmp>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</xmp>',
+        { allowedTags: [ 'xmp' ] }
+      ), '<xmp>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</xmp>'
+    );
+  });
+  it('should correctly maintain escaping when allowing an xmp element', function() {
+    assert.equal(
+      sanitizeHtml('!<xmp>&lt;/xmp&gt;&lt;svg/onload=prompt`xs`&gt;</xmp>!',
+        { allowedTags: [ 'xmp' ] }
+      ), '!<xmp>&lt;/xmp&gt;&lt;svg/onload=prompt`xs`&gt;</xmp>!'
+    );
+  });
+
+  describe('CVE-2026-44990 regression and raw-text edge cases', function() {
+    it('should escape raw-text inner content when xmp tag is disallowed and discarded under custom nonTextTags', function() {
+      assert.strictEqual(
+        sanitizeHtml('<xmp><script>alert(1)</script></xmp>', {
+          nonTextTags: ['script', 'style']
+        }),
+        '&lt;script&gt;alert(1)&lt;/script&gt;'
+      );
+    });
+
+    it('should escape raw-text inner content when script tag is disallowed and discarded under empty nonTextTags', function() {
+      assert.strictEqual(
+        sanitizeHtml('<script><svg onload=alert(1)></script>', {
+          nonTextTags: []
+        }),
+        '&lt;svg onload=alert(1)&gt;'
+      );
+    });
+
+    it('should escape raw-text inner content when textarea tag is disallowed and discarded', function() {
+      assert.strictEqual(
+        sanitizeHtml('<textarea><script>alert(1)</script></textarea>', {
+          nonTextTags: []
+        }),
+        '&lt;script&gt;alert(1)&lt;/script&gt;'
+      );
+    });
+
+    it('should escape raw-text inner content when style tag is disallowed and discarded', function() {
+      assert.strictEqual(
+        sanitizeHtml('<style><a onload=alert(1)></style>', {
+          nonTextTags: []
+        }),
+        '&lt;a onload=alert(1)&gt;'
+      );
+    });
+
+    it('should handle malformed or unclosed raw-text tags correctly', function() {
+      assert.strictEqual(
+        sanitizeHtml('<xmp><script>alert(1)', {
+          nonTextTags: ['script', 'style']
+        }),
+        '&lt;script&gt;alert(1)'
+      );
+    });
+
+    it('should handle sibling raw-text elements correctly without leaking states', function() {
+      assert.strictEqual(
+        sanitizeHtml('<noembed><script>alert(1)</script></noembed><noscript><style>body{}</style></noscript>', {
+          nonTextTags: []
+        }),
+        'alert(1)body{}'
+      );
+    });
   });
 });
