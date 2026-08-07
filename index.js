@@ -540,8 +540,13 @@ function sanitizeHtml(html, options, _recursing) {
         result += ' />';
       } else {
         result += '>';
-        if (frame.innerText && !hasText && !options.textFilter) {
-          result += escapeHtml(frame.innerText);
+        if (frame.innerText && !hasText) {
+          const escaped = escapeHtml(frame.innerText);
+          if (options.textFilter) {
+            result += options.textFilter(escaped, name);
+          } else {
+            result += escaped;
+          }
           addedText = true;
         }
       }
@@ -573,14 +578,34 @@ function sanitizeHtml(html, options, _recursing) {
         // which have their own collection of XSS vectors.
         result += text;
       } else if (tag && tagAllowed(tag) && (options.disallowedTagsMode === 'discard' || options.disallowedTagsMode === 'completelyDiscard') && (tag === 'textarea' || tag === 'xmp')) {
-        // htmlparser2 treats <textarea> and <xmp> as raw text elements and
-        // does NOT decode entities inside them. The text is already properly
-        // encoded, so pass it through without additional escaping to avoid
-        // double-encoding. Other "nonTextTags" like <option> are not raw text
-        // elements in htmlparser2, so their contents are decoded and must be
-        // escaped below like any other text (important to prevent XSS via
-        // entity-encoded payloads such as <option>&lt;script&gt;...&lt;/script&gt;</option>).
-        result += text;
+        // <textarea> and <xmp> hold text that must not be re-emitted verbatim:
+        // if a raw `<` survives into the output it can reopen a tag when the
+        // result is re-parsed by a browser, smuggling non-allowlisted markup
+        // through the allowlist (mutation-XSS, GHSA-jxwj-j7wr-gfrw — e.g. the
+        // `</textarea/>` solidus mis-close, which htmlparser2 10.x does not
+        // recognize as an end tag). Escaping unconditionally also closes the
+        // related SVG/MathML foreign-content bypass (where a real HTML5 parser
+        // treats <textarea>/<xmp> as ordinary foreign elements and re-parses
+        // their contents as live markup, e.g.
+        // `<svg><textarea><img src=x onerror=alert(1)></textarea></svg>`):
+        // since we never re-emit raw text for these tags, no namespace check is
+        // needed.
+        //
+        // NOTE (fork): upstream 2.17.6 escapes <textarea> with escapeHtml()
+        // because htmlparser2 >= 11 DECODES entities inside RCDATA elements.
+        // This fork stays on htmlparser2 10.x, which does NOT decode entities
+        // inside either <textarea> or <xmp> — their content reaches us as raw,
+        // already-encoded source. So both tags get the raw-text treatment here:
+        // escape only the angle brackets, so a literal `<` cannot reopen a tag,
+        // while leaving `&` untouched to avoid double-encoding entities that are
+        // already encoded in the source. Using escapeHtml() here would turn
+        // `&lt;` into `&amp;lt;`.
+        //
+        // Other "nonTextTags" like <option> are not raw text elements in
+        // htmlparser2, so their contents are decoded and must be escaped below
+        // like any other text (important to prevent XSS via entity-encoded
+        // payloads such as <option>&lt;script&gt;...&lt;/script&gt;</option>).
+        result += text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
       } else if (!addedText) {
         const escaped = escapeHtml(text, false);
         if (options.textFilter) {

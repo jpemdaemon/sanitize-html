@@ -2,8 +2,30 @@
 
 > **@mdaemon fork notes**
 >
+> - **2.17.6 (fork sync):** Synced source (`index.js`, tests) to upstream sanitize-html 2.17.6, **excluding the `htmlparser2` 12.x upgrade**. Upstream moved to `htmlparser2` ^12.0.0, which is ESM-only (from v11) and therefore forces `engines.node >= 22.12.0`; this fork deliberately stays on `htmlparser2` ^10.1.0 to remain CommonJS-compatible. Both of upstream's 2.17.6 security fixes are included and verified — see "fork divergence" below. Also upgraded devDependencies `mocha` to ^11.8.0 and `sinon` to ^22.1.0, with npm `overrides` pinning `serialize-javascript` ^7.0.7 and `diff` ^9.0.0 to clear dev-only advisories.
 > - **2.17.5 (fork sync):** Synced source (`index.js`, tests) to upstream sanitize-html 2.17.5 from the ApostropheCMS monorepo, while retaining this fork's browser build (UMD/ES bundles via Vite), `index.d.ts`, and `src/browser.js`. Added `launder` as a dependency (required by upstream since 2.17.4 for `naughtyHref`) and bumped `htmlparser2` to ^10.1.0.
 > - **(earlier fork entry):** Fix to vulnerabilities found in postcss's dependency "nanoid" by upgrading postcss to 8.5.6.
+>
+> **Fork divergence in 2.17.6 — raw-text escaping**
+>
+> Upstream fixes both 2.17.6 vulnerabilities at two layers: (1) upgrading `htmlparser2` to 12.x, and (2) always HTML-escaping the raw text emitted for `textarea`/`xmp`. This fork takes **layer 2 only**. Layer 2 is sufficient on its own: because sanitize-html never re-emits a live `<` for these tags, neither the `</textarea/>` solidus mis-close nor the SVG/MathML foreign-content differential can smuggle markup past the allowlist, regardless of how the parser tokenized it.
+>
+> The escaping itself is adapted, because the two parser versions differ. Upstream escapes `textarea` with `escapeHtml()` since `htmlparser2` >= 11 *decodes* entities inside RCDATA elements. On `htmlparser2` 10.x neither `textarea` nor `xmp` has its entities decoded, so both receive the raw-text treatment here — angle brackets only, leaving `&` untouched. Applying upstream's `textarea` branch verbatim on 10.x would double-encode (`&lt;` to `&amp;lt;`).
+>
+> Verified: all 17 published attack payloads from both advisories produce output containing no live element when the sanitized result is re-parsed with `parse5` (spec-compliant, browser-grade). The same check against the pre-fix `index.js` shows 15 of 17 producing live `<img onerror>` / `<script>` / `<iframe src=javascript:>` / `<svg onload>`, confirming this fork was genuinely affected and is now fixed. Because expected output differs from upstream's wherever the parser version is observable, the ported tests assert this fork's exact (inert) output; those cases are commented `NOTE (fork)` in `test/test.js`.
+
+## 2.17.6 (2026-07-10)
+
+### Fixes
+
+- Allow transformTags to emit text when textFilter is set, even if the tag is initially empty. This is consistent with the documentation. Thanks to [spokodev](https://github.com/spokodev) for the fix.
+
+### Security
+
+- Fixed an XSS/allowlist bypass in which the contents of a raw-text element (`textarea` or `xmp`) nested inside an `svg` or `math` root were re-emitted without HTML-escaping. `sanitize-html` treated that content as inert raw text because `htmlparser2` classified raw-text elements by tag name and ignored the namespace, but a real HTML5 parser treats `textarea`/`xmp` as ordinary foreign elements inside SVG/MathML and re-parses their contents as live markup. As a result, markup and event-handler attributes that the allowlist never permitted (for example `<svg><textarea><img src=x onerror=alert(1)>`) could survive sanitization and execute in the browser. The default configuration is not affected; the precondition is an `allowedTags` that includes `svg` or `math` together with `textarea` or `xmp`. Thanks to [khoadb175](https://github.com/khoadb175) for responsibly disclosing the vulnerability.
+- Fixed a mutation-XSS / `allowedTags` bypass affecting configurations that allow the `textarea` or `xmp` raw-text tags. `htmlparser2` 10.x does not recognize an end tag with a trailing solidus (e.g. `</textarea/>`) as closing the element, so it keeps the following markup as raw text, but a spec-compliant browser treats `</textarea/>` as a valid close and parses that markup as a live element. Because raw-text content was re-emitted without escaping, a payload such as `<textarea></textarea/><img src=x onerror=...>` could smuggle non-allowlisted, executable markup through the sanitizer. The default configuration was not affected. Thanks to [bibu123456](https://github.com/bibu123456) for reporting the vulnerability and [Kayiz-PT](https://github.com/Kayiz-PT) for coordinating the disclosure (GHSA-jxwj-j7wr-gfrw).
+
+> **Fork note:** upstream also upgraded `htmlparser2` to 12.x as a second defensive layer for both issues above. This fork stays on `htmlparser2` ^10.1.0 to remain CommonJS-compatible and instead relies on the escaping layer, which closes both bypasses on its own. See the fork notes at the top of this file for details and verification.
 
 ## 2.17.5 (2026-06-10)
 
