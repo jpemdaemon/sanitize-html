@@ -55,6 +55,14 @@ declare namespace sanitizeHtml {
     preserveEscapedAttributes?: boolean;
     onOpenTag?: (name: string, attribs: Attributes) => void;
     onCloseTag?: (name: string, isImplied: boolean) => void;
+    logger?: Logger;
+  }
+
+  interface Logger {
+    debug?(...args: any[]): void;
+    info?(...args: any[]): void;
+    warn?(...args: any[]): void;
+    error?(...args: any[]): void;
   }
 
   interface ParserOptions {

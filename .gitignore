@@ -7,3 +7,7 @@ public/css/*.css
 
 # Keep dist directory for browser builds but ignore temp files
 dist/*.dev.*
+
+claude.md
+
+release

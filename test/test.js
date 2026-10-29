@@ -686,7 +686,11 @@ describe('sanitizeHtml', function() {
 
   it('should deliver a warning if using vulnerable tags', function() {
     const spy = sinon.spy(console, 'warn');
-    const message = '\n\n⚠️ Your `allowedTags` option includes, `style`, which is inherently\nvulnerable to XSS attacks. Please remove it from `allowedTags`.\nOr, to disable this warning, add the `allowVulnerableTags` option\nand ensure you are accounting for this risk.\n\n';
+    const message = 'Your `allowedTags` option includes `style`, which is ' +
+      'inherently vulnerable to XSS attacks. Please remove it from ' +
+      '`allowedTags`, or, to disable this warning, add the ' +
+      '`allowVulnerableTags` option and ensure you are accounting for this ' +
+      'risk.';
 
     sanitizeHtml(
       '<style></style>',
@@ -696,6 +700,28 @@ describe('sanitizeHtml', function() {
     );
 
     assert(spy.calledWith(message));
+    // Restore the spied-upon method
+    /* eslint-disable-next-line no-console */
+    console.warn.restore();
+  });
+
+  it('should deliver warnings to the logger option instead of the console', function() {
+    const spy = sinon.spy(console, 'warn');
+    const warnings = [];
+
+    sanitizeHtml(
+      '<style></style>',
+      {
+        allowedTags: [ 'style' ],
+        logger: {
+          warn: (message) => warnings.push(message)
+        }
+      }
+    );
+
+    assert.equal(warnings.length, 1);
+    assert(warnings[0].includes('`style`'));
+    assert(spy.notCalled);
     // Restore the spied-upon method
     /* eslint-disable-next-line no-console */
     console.warn.restore();
@@ -999,6 +1025,17 @@ describe('sanitizeHtml', function() {
       '<img src="fallback.jpg" srcset="/upload/f_auto,q_auto:eco,c_fit,w_1460,h_2191/abc.jpg 1460w, /upload/f_auto,q_auto:eco,c_fit,w_1360,h_2041/abc.jpg" />'
     );
   });
+  it('should apply allowedSchemesByTag restrictions to srcset URLs', function() {
+    assert.equal(
+      sanitizeHtml('<img src="https://example.com/fallback.jpg" srcset="https://example.com/foo.jpg 100w" />', {
+        allowedTags: sanitizeHtml.defaults.allowedTags.concat([ 'img' ]),
+        allowedAttributes: { img: [ 'src', 'srcset' ] },
+        allowedSchemes: [ 'http', 'https' ],
+        allowedSchemesByTag: { img: [] }
+      }),
+      '<img />'
+    );
+  });
   it('should drop javascript: in form action', function() {
     assert.equal(
       sanitizeHtml('<form action="javascript:alert(1)"><button>x</button></form>', {
@@ -1237,6 +1274,26 @@ describe('sanitizeHtml', function() {
         }
       }), '<span style="color:yellow;text-align:center;font-family:helvetica"></span>'
     );
+  });
+  it('Should merge tag-specific and global styles without giving a __proto__ key special meaning', function() {
+    // JSON.parse creates an own "__proto__" property, as configuration loaded
+    // from a file would
+    const allowedStyles = JSON.parse(`{
+      "*": { "color": [], "__proto__": [ "inherited" ] },
+      "span": { "__proto__": [ "inherited" ], "font-family": [] }
+    }`);
+    allowedStyles['*'].color.push(/yellow/);
+    allowedStyles.span['font-family'].push(/helvetica/);
+    assert.equal(
+      sanitizeHtml('<span style=\'color: yellow; font-family: helvetica; inherited: true\'></span>', {
+        allowedTags: false,
+        allowedAttributes: {
+          span: [ 'style' ]
+        },
+        allowedStyles
+      }), '<span style="color:yellow;font-family:helvetica"></span>'
+    );
+    assert.equal(({}).length, undefined);
   });
   it('should delete the script tag', function() {
     assert.equal(sanitizeHtml('<script src="https://www.unauthorized.com/lib.js"></script>', {
@@ -2053,6 +2110,79 @@ describe('sanitizeHtml', function() {
       ), '!<xmp>&lt;/xmp&gt;&lt;svg/onload=prompt`xs`&gt;</xmp>!'
     );
   });
+  it('should sanitize away disallowed iframe without escaping fallback html', function() {
+    // Regression for #5550: htmlparser2 treats iframe as raw-text, so an
+    // unclosed iframe's following markup arrives as text and must be
+    // re-sanitized rather than escaped when the iframe is discarded.
+    // NOTE (fork): htmlparser2 10.x does not treat iframe as raw-text; it
+    // parses the fallback markup as ordinary elements, so this passes without
+    // upstream's re-sanitize branch.
+    assert.equal(
+      sanitizeHtml('<iframe src="http://nono.ohno"><i>test</i>'),
+      '<i>test</i>'
+    );
+  });
+  it('should re-sanitize closed disallowed iframe fallback html', function() {
+    assert.equal(
+      sanitizeHtml('<iframe src="http://nono.ohno"><i>test</i></iframe>'),
+      '<i>test</i>'
+    );
+  });
+  it('should not allow XSS via disallowed iframe fallback markup', function() {
+    assert.equal(
+      sanitizeHtml('<iframe src="http://evil"><img src=x onerror=alert(1)><b>ok</b>'),
+      '<b>ok</b>'
+    );
+  });
+  describe('GHSA-c9rx-x947-fp3h: nested discarded iframe fallback', function() {
+    it('should not overflow the stack on deeply nested unclosed iframes', function() {
+      assert.doesNotThrow(function() {
+        sanitizeHtml('<iframe>'.repeat(20000));
+      });
+    });
+
+    it('should not overflow the stack on deeply nested unclosed iframes followed by text', function() {
+      let result;
+      assert.doesNotThrow(function() {
+        result = sanitizeHtml('<iframe>'.repeat(20000) + 'x');
+      });
+      assert(!/<iframe/i.test(result));
+    });
+
+    it('should still keep the fallback of a few nested discarded iframes', function() {
+      assert.strictEqual(
+        sanitizeHtml('<iframe><p>a</p><iframe><p>b</p><iframe><p>c</p>'),
+        '<p>a</p><p>b</p><p>c</p>'
+      );
+    });
+
+    it('should enforce nestingLimit across a discarded iframe fallback', function() {
+      assert.strictEqual(
+        sanitizeHtml('<iframe><b><b><iframe><b><b>x', {
+          allowedTags: [ 'b' ],
+          nestingLimit: 3
+        }),
+        '<b><b>x</b></b>'
+      );
+    });
+
+    it('should cap output nesting at nestingLimit with many nested discarded iframes', function() {
+      const input = ('<iframe>' + '<b>'.repeat(3)).repeat(50) + 'x';
+      const result = sanitizeHtml(input, {
+        allowedTags: [ 'b' ],
+        nestingLimit: 3
+      });
+      let depth = 0;
+      let max = 0;
+      result.replace(/<(\/?)b>/g, function(match, closing) {
+        depth += closing ? -1 : 1;
+        max = Math.max(max, depth);
+        return match;
+      });
+      assert(max <= 3, `nesting depth ${max} exceeds nestingLimit`);
+      assert(result.includes('x'));
+    });
+  });
 
   describe('CVE-2026-44990 regression and raw-text edge cases', function() {
     it('should escape raw-text inner content when xmp tag is disallowed and discarded under custom nonTextTags', function() {
@@ -2370,6 +2500,15 @@ describe('sanitizeHtml', function() {
       );
     });
 
+    it('should not double-encode entities in a plain allowed textarea (unaffected by the fix)', function() {
+      assert.strictEqual(
+        sanitizeHtml('<textarea>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</textarea>', {
+          allowedTags: [ 'textarea' ]
+        }),
+        '<textarea>&lt;div&gt;hello&lt;/div&gt;&amp;amp;</textarea>'
+      );
+    });
+
     it('should not allow a disallowed tag inside a disallowed textarea to remain in any form', function() {
       assert.strictEqual(
         sanitizeHtml('<div><textarea><img src="alert(1)" /></textarea></div>'),
@@ -2404,6 +2543,406 @@ describe('sanitizeHtml', function() {
           allowedAttributes: {}
         }),
         '<svg><option></option></svg>'
+      );
+    });
+  });
+
+  describe('SVG SMIL animation retargeting a URL attribute (scheme policy bypass)', function() {
+    // Background: a SMIL animation element (<animate>, <set>, ...) names the
+    // attribute it animates with `attributeName`, and supplies the new values in
+    // sibling attributes (`values`, `from`, `to`, `by`). When `attributeName`
+    // selects `href` or `xlink:href`, those value attributes become URLs that a
+    // browser writes into the link sink *after* sanitization, so the sanitizer's
+    // scheme policy never sees them. `values` is worse still: it is a
+    // semicolon-separated LIST, so checking it as one flat URL only ever
+    // validates a prefix — `values="#safe;javascript:alert(1)"` passes as a
+    // relative fragment while the browser animates the link to `javascript:`.
+    //
+    // The precondition is an allowedTags/allowedAttributes pairing that permits
+    // an animation element together with `attributeName` and a value attribute.
+
+    const animationOptions = function(extra) {
+      return Object.assign({
+        allowedTags: [ 'svg', 'a', 'text', 'animate', 'set' ],
+        allowedAttributes: {
+          a: [ 'href', 'xlink:href' ],
+          text: [ 'y' ],
+          animate: [ 'attributename', 'values', 'from', 'to', 'by', 'dur', 'fill' ],
+          set: [ 'attributename', 'to', 'dur', 'fill' ]
+        }
+      }, extra || {});
+    };
+
+    it('should drop an <animate> whose values list smuggles javascript: after a safe fragment', function() {
+      // The advisory PoC: `values` is explicitly added to the scheme-checked
+      // attributes, yet the leading `#safe` entry made the whole list pass.
+      const out = sanitizeHtml(
+        '<svg><a><animate attributeName="href" values="#safe;javascript:alert(\'XSS\')" dur=".01s" fill="freeze"></animate><text y="30">Click me</text></a></svg>',
+        animationOptions({
+          allowedSchemesAppliedToAttributes:
+            sanitizeHtml.defaults.allowedSchemesAppliedToAttributes.concat([ 'values' ])
+        })
+      );
+      assert.strictEqual(out, '<svg><a><text y="30">Click me</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop an <animate> retargeting href even when values is not scheme-checked', function() {
+      // The default configuration does not scheme-check `values` at all, so the
+      // payload does not even need the leading safe entry.
+      const out = sanitizeHtml(
+        '<svg><a><animate attributeName="href" values="javascript:alert(1)" dur=".01s" fill="freeze"></animate><text y="30">Click me</text></a></svg>',
+        animationOptions()
+      );
+      assert.strictEqual(out, '<svg><a><text y="30">Click me</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop an <animate> retargeting href via from', function() {
+      const out = sanitizeHtml(
+        '<svg><a><animate attributeName="href" from="javascript:alert(1)" to="#safe" dur="1s"></animate><text>x</text></a></svg>',
+        animationOptions()
+      );
+      assert.strictEqual(out, '<svg><a><text>x</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop a <set> retargeting href via to', function() {
+      const out = sanitizeHtml(
+        '<svg><a href="#safe"><set attributeName="href" to="javascript:alert(1)" fill="freeze"></set><text>x</text></a></svg>',
+        animationOptions()
+      );
+      assert.strictEqual(out, '<svg><a href="#safe"><text>x</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop an <animate> retargeting href via by', function() {
+      const out = sanitizeHtml(
+        '<svg><a><animate attributeName="href" by="javascript:alert(1)" dur="1s"></animate><text>x</text></a></svg>',
+        animationOptions()
+      );
+      assert.strictEqual(out, '<svg><a><text>x</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop an <animate> retargeting the xlink:href form of the link sink', function() {
+      const out = sanitizeHtml(
+        '<svg><a xlink:href="#safe"><animate attributeName="xlink:href" values="#safe;javascript:alert(1)" dur="1s"></animate><text>x</text></a></svg>',
+        animationOptions()
+      );
+      assert.strictEqual(out, '<svg><a xlink:href="#safe"><text>x</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop an animation retargeting href regardless of case or surrounding whitespace', function() {
+      const out = sanitizeHtml(
+        '<svg><a><animate attributeName=" HREF " values="#safe;javascript:alert(1)" dur="1s"></animate><text>x</text></a></svg>',
+        animationOptions()
+      );
+      assert.strictEqual(out, '<svg><a><text>x</text></a></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop an animation targeting any other attribute the scheme policy covers', function() {
+      // The rule is not specific to links: an animation must not be able to
+      // write an unchecked URL into any attribute we would scheme check.
+      const out = sanitizeHtml(
+        '<svg><image><animate attributeName="src" to="javascript:alert(1)" dur="1s"></animate></image></svg>',
+        animationOptions({
+          allowedTags: [ 'svg', 'image', 'animate' ],
+          allowedAttributes: { animate: [ 'attributename', 'to', 'dur' ] }
+        })
+      );
+      assert.strictEqual(out, '<svg><image></image></svg>');
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should escape rather than execute the animation under disallowedTagsMode escape', function() {
+      // In escape mode a rejected element becomes inert text, as it does for any
+      // other disallowed tag, so the payload is displayed and never animated.
+      assert.strictEqual(
+        sanitizeHtml(
+          '<svg><a><animate attributeName="href" values="#safe;javascript:alert(1)" dur="1s"></animate><text>x</text></a></svg>',
+          animationOptions({ disallowedTagsMode: 'escape' })
+        ),
+        '<svg><a>&lt;animate attributename="href" values="#safe;javascript:alert(1)" dur="1s"&gt;&lt;/animate&gt;<text>x</text></a></svg>'
+      );
+    });
+
+    it('should drop the animation even when the value attributes are not allowed', function() {
+      // The element is rejected on the strength of its target alone, so a
+      // payload cannot be reintroduced by another layer that reattaches values.
+      const out = sanitizeHtml(
+        '<svg><a><animate attributeName="href"></animate><text>x</text></a></svg>',
+        animationOptions({
+          allowedAttributes: { animate: [ 'attributename' ] }
+        })
+      );
+      assert.strictEqual(out, '<svg><a><text>x</text></a></svg>');
+    });
+
+    // --- Regression guards: harmless animations must be preserved ---
+
+    it('should keep an <animate> targeting a presentation attribute such as fill', function() {
+      assert.strictEqual(
+        sanitizeHtml(
+          '<svg><a><animate attributeName="fill" values="red;blue" dur="1s"></animate><text>x</text></a></svg>',
+          animationOptions()
+        ),
+        '<svg><a><animate attributename="fill" values="red;blue" dur="1s"></animate><text>x</text></a></svg>'
+      );
+    });
+
+    it('should keep a <set> targeting a harmless attribute', function() {
+      assert.strictEqual(
+        sanitizeHtml(
+          '<svg><a><set attributeName="opacity" to="0" dur="1s"></set><text>x</text></a></svg>',
+          animationOptions()
+        ),
+        '<svg><a><set attributename="opacity" to="0" dur="1s"></set><text>x</text></a></svg>'
+      );
+    });
+
+    it('should keep an href attribute on a non-animation element that happens to allow attributeName', function() {
+      assert.strictEqual(
+        sanitizeHtml(
+          '<svg><a href="#safe" attributeName="href"><text>x</text></a></svg>',
+          animationOptions({
+            allowedAttributes: {
+              a: [ 'href', 'attributename' ],
+              text: [ 'y' ]
+            }
+          })
+        ),
+        '<svg><a href="#safe" attributename="href"><text>x</text></a></svg>'
+      );
+    });
+  });
+
+  describe('GHSA-374f-7chj-9948: namespace-prefixed SVG SMIL animation elements', function() {
+    // In an XML serialization (XHTML, standalone SVG) `svg:animate` is the same
+    // element as `animate`, so the prefix must not hide an animation element
+    // that retargets a URL attribute.
+    const permissive = {
+      allowedTags: false,
+      allowedAttributes: false,
+      allowedSchemes: [ 'http', 'https' ],
+      allowVulnerableTags: true
+    };
+    const tags = [ 'animate', 'animateColor', 'animateMotion', 'animateTransform', 'set' ];
+    const prefixes = [ 'svg:', 'SVG:', 'xlink:', 'a:b:' ];
+
+    it('should drop every prefixed animation element retargeting href', function() {
+      tags.forEach(function(tag) {
+        prefixes.forEach(function(prefix) {
+          const name = prefix + tag;
+          const out = sanitizeHtml(
+            '<svg><a href="#safe"><' + name + ' attributeName="href" values="#safe;javascript:alert(document.domain)" to="javascript:alert(1)" dur=".01s" fill="freeze"/><text>Click</text></a></svg>',
+            permissive
+          );
+          assert.ok(!/javascript:/i.test(out), name + ' must not survive: ' + out);
+        });
+      });
+    });
+
+    it('should drop a prefixed animation retargeting xlink:href', function() {
+      const out = sanitizeHtml(
+        '<svg><a xlink:href="#safe"><svg:set attributeName="xlink:href" to="javascript:alert(1)"/><text>x</text></a></svg>',
+        permissive
+      );
+      assert.ok(!/javascript:/i.test(out), 'no javascript: URL may survive: ' + out);
+    });
+
+    it('should drop a prefixed animation that is explicitly allowed by name', function() {
+      const out = sanitizeHtml(
+        '<svg><a href="#safe"><svg:animate attributeName="href" values="javascript:alert(1)"></svg:animate><text>x</text></a></svg>',
+        {
+          allowedTags: [ 'svg', 'a', 'text', 'svg:animate' ],
+          allowedAttributes: {
+            a: [ 'href' ],
+            'svg:animate': [ 'attributename', 'values' ]
+          }
+        }
+      );
+      assert.strictEqual(out, '<svg><a href="#safe"><text>x</text></a></svg>');
+    });
+
+    it('should keep a prefixed animation targeting a harmless attribute', function() {
+      assert.strictEqual(
+        sanitizeHtml(
+          '<svg><rect><svg:animate attributeName="fill" values="red;blue"></svg:animate></rect></svg>',
+          permissive
+        ),
+        '<svg><rect><svg:animate attributename="fill" values="red;blue"></svg:animate></rect></svg>'
+      );
+    });
+  });
+
+  describe('GHSA-cv27-6wvh-8x7j: meta http-equiv="refresh" destination scheme check', function() {
+    const metaOptions = function(extra) {
+      return Object.assign({
+        allowedTags: [ 'meta' ],
+        allowedAttributes: { meta: [ 'http-equiv', 'content', 'name' ] }
+      }, extra || {});
+    };
+
+    it('should drop a refresh content attribute pointing to javascript:', function() {
+      assert.strictEqual(
+        sanitizeHtml('<meta http-equiv="refresh" content="0;url=javascript:alert(1)">', metaOptions()),
+        '<meta http-equiv="refresh" />'
+      );
+    });
+
+    it('should drop a refresh content attribute pointing to data:', function() {
+      assert.strictEqual(
+        sanitizeHtml('<meta http-equiv="refresh" content="0;url=data:text/html,aaa">', metaOptions()),
+        '<meta http-equiv="refresh" />'
+      );
+    });
+
+    it('should drop refresh destinations regardless of url= spelling, separators, quoting or case', function() {
+      [
+        '0;URL=javascript:alert(1)',
+        '0; url = javascript:alert(1)',
+        '0,url=javascript:alert(1)',
+        '0 url=javascript:alert(1)',
+        '  1.5 ;  Url=JavaScript:alert(1)',
+        '.5;url=javascript:alert(1)',
+        '0;url="javascript:alert(1)"',
+        '0;url=\'javascript:alert(1)\'',
+        '0;javascript:alert(1)',
+        '0;"javascript:alert(1)"',
+        '0;url=java&#x09;script:alert(1)',
+        '0;url=&#x20;javascript:alert(1)',
+        '0;url=vbscript:msgbox(1)'
+      ].forEach(function(content) {
+        const html = '<meta http-equiv="refresh" content="' + content.replace(/"/g, '&quot;') + '">';
+        assert.strictEqual(sanitizeHtml(html, metaOptions()), '<meta http-equiv="refresh" />', html);
+      });
+    });
+
+    it('should match http-equiv case-insensitively and in any attribute order', function() {
+      assert.strictEqual(
+        sanitizeHtml('<meta content="0;url=javascript:alert(1)" HTTP-EQUIV="Refresh">', metaOptions()),
+        '<meta http-equiv="Refresh" />'
+      );
+    });
+
+    it('should drop refresh content that cannot be parsed as a refresh', function() {
+      assert.strictEqual(
+        sanitizeHtml('<meta http-equiv="refresh" content="javascript:alert(1)">', metaOptions()),
+        '<meta http-equiv="refresh" />'
+      );
+    });
+
+    it('should honor allowedSchemesByTag for meta', function() {
+      const options = metaOptions({ allowedSchemesByTag: { meta: [ 'https' ] } });
+      assert.strictEqual(
+        sanitizeHtml('<meta http-equiv="refresh" content="0;url=http://example.com/">', options),
+        '<meta http-equiv="refresh" />'
+      );
+      assert.strictEqual(
+        sanitizeHtml('<meta http-equiv="refresh" content="0;url=https://example.com/">', options),
+        '<meta http-equiv="refresh" content="0;url=https://example.com/" />'
+      );
+    });
+
+    it('should keep refresh content with an allowed or relative destination, or none', function() {
+      [
+        '0;url=https://example.com/',
+        '0; URL=\'https://example.com/\'',
+        '0;url=/relative/path',
+        '5'
+      ].forEach(function(content) {
+        const html = '<meta http-equiv="refresh" content="' + content + '">';
+        assert.strictEqual(
+          sanitizeHtml(html, metaOptions()),
+          '<meta http-equiv="refresh" content="' + content + '" />'
+        );
+      });
+    });
+
+    it('should leave content alone on meta elements that are not refreshes', function() {
+      assert.strictEqual(
+        sanitizeHtml('<meta name="description" content="0;url=javascript:alert(1)">', metaOptions()),
+        '<meta name="description" content="0;url=javascript:alert(1)" />'
+      );
+    });
+  });
+
+  describe('GHSA-x3q4-9hxx-gx8m: nonTextTags discard region ended early by an implied close', function() {
+    // With scripting enabled, browsers parse <noscript> content as raw text up
+    // to the first `</noscript`. htmlparser2 parses it as markup, so an end tag
+    // for an ancestor inside <noscript> makes htmlparser2 close the <noscript>
+    // implicitly. That implied close must not end the discard region early.
+    const noscriptOptions = {
+      allowedTags: [ 'div', 'img', 'p' ],
+      allowedAttributes: { img: [ 'src' ] },
+      nonTextTags: [ 'script', 'style', 'textarea', 'option', 'noscript' ]
+    };
+
+    it('should not emit noscript content after an ancestor end tag inside noscript', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><noscript></div><img src="http://evil.test/t.gif"></noscript>', noscriptOptions),
+        '<div></div>'
+      );
+    });
+
+    it('should resume normal output after the real noscript end tag', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><noscript></div><img src="http://evil.test/t.gif"></noscript><p>after</p>', noscriptOptions),
+        '<div></div><p>after</p>'
+      );
+    });
+
+    it('should close every ancestor unwound from inside noscript', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><p><noscript></div><img src="http://evil.test/t.gif"><p>x</p></noscript><p>after</p>', noscriptOptions),
+        '<div><p></p></div><p>after</p>'
+      );
+    });
+
+    it('should recognize noscript end tags the way a browser does', function() {
+      [ '</NOSCRIPT>', '</noscript/>', '</noscript >', '</noscript\n>' ].forEach(function(end) {
+        assert.strictEqual(
+          sanitizeHtml('<div><noscript></div><img src="http://evil.test/t.gif">' + end + '<p>after</p>', noscriptOptions),
+          '<div></div><p>after</p>'
+        );
+      });
+    });
+
+    it('should not treat a longer tag name as the noscript end tag', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><noscript></div><img src="http://evil.test/a.gif"></noscriptx><img src="http://evil.test/b.gif">', noscriptOptions),
+        '<div></div>'
+      );
+    });
+
+    it('should still discard well-formed noscript content and keep what follows', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><noscript><img src="http://evil.test/t.gif"><style>a{}</style><p>x</p></noscript><p>after</p></div>', noscriptOptions),
+        '<div><p>after</p></div>'
+      );
+    });
+
+    it('should still end an option discard region on an implied close by the next option', function() {
+      assert.strictEqual(
+        sanitizeHtml('<select><option>a<option>b</select><p>after</p>'),
+        '<p>after</p>'
+      );
+    });
+
+    it('should still end an option discard region when an ancestor end tag closes it', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><select><option>a</div><p>after</p>', { allowedTags: [ 'div', 'p' ] }),
+        '<div></div><p>after</p>'
+      );
+    });
+
+    it('should still keep content following a discarded style element', function() {
+      assert.strictEqual(
+        sanitizeHtml('<div><style>.x{color:red}</style><p>ok</p></div>'),
+        '<div><p>ok</p></div>'
       );
     });
   });

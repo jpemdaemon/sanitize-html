@@ -1,7 +1,6 @@
 const htmlparser = require('htmlparser2');
 const escapeStringRegexp = require('escape-string-regexp');
 const { isPlainObject } = require('is-plain-object');
-const deepmerge = require('deepmerge');
 const parseSrcset = require('parse-srcset');
 const { parse: postcssParse } = require('postcss');
 const { naughtyHref: launderNaughtyHref } = require('launder');
@@ -12,6 +11,33 @@ const mediaTags = [
 ];
 // Tags that are inherently vulnerable to being used in XSS attacks.
 const vulnerableTags = [ 'script', 'style' ];
+// SVG SMIL animation elements. These do not carry a URL themselves: they
+// retarget an attribute of another element, naming it with `attributeName`
+// and supplying the new value(s) in `values`, `from`, `to` and `by`.
+const svgAnimationTags = [
+  'animate', 'animatecolor', 'animatemotion', 'animatetransform', 'set'
+];
+// Attribute names that always name a URL sink, whatever
+// `allowedSchemesAppliedToAttributes` has been narrowed to. A namespace prefix
+// is ignored when matching, so `xlink:href` and any other prefixed spelling of
+// `href` are covered.
+const alwaysUrlAttributes = [ 'href' ];
+
+// Our own diagnostics. A console-shaped `logger` option takes them instead of
+// the console; missing methods fall back to it.
+const severities = [ 'debug', 'info', 'warn', 'error' ];
+
+function loggerFor(options) {
+  const source = (options && options.logger) || console;
+  const logger = {};
+  for (const severity of severities) {
+    logger[severity] = typeof source[severity] === 'function'
+      ? (...args) => source[severity](...args)
+      // eslint-disable-next-line no-console
+      : (...args) => console[severity](...args);
+  }
+  return logger;
+}
 
 function each(obj, cb) {
   if (obj) {
@@ -24,6 +50,29 @@ function each(obj, cb) {
 // Avoid false positives with .__proto__, .hasOwnProperty, etc.
 function has(obj, key) {
   return ({}).hasOwnProperty.call(obj, key);
+}
+
+// Combine the tag-specific and wildcard lists of allowed classes
+function mergeClasses(specific, wildcard) {
+  if (!Array.isArray(specific) || !Array.isArray(wildcard)) {
+    return wildcard;
+  }
+  return specific.concat(wildcard);
+}
+
+// Combine the tag-specific and wildcard allowed styles, concatenating the
+// lists of regular expressions for properties that appear in both. The result
+// has no prototype, so a property named `__proto__` is just another property
+function mergeStyles(specific, wildcard) {
+  const merged = Object.create(null);
+  for (const rules of [ specific, wildcard ]) {
+    for (const prop of Object.keys(rules)) {
+      merged[prop] = has(merged, prop)
+        ? merged[prop].concat(rules[prop])
+        : rules[prop];
+    }
+  }
+  return merged;
 }
 
 // Returns those elements of `a` for which `cb(a)` returns truthy
@@ -76,14 +125,19 @@ module.exports = sanitizeHtml;
 // attribute name state with an empty attribute name buffer.
 const VALID_HTML_ATTRIBUTE_NAME = /^[^\0\t\n\f\r /<=>]+$/;
 
-// Ignore the _recursing flag; it's there for recursive
-// invocation as a guard against this exploit:
-// https://github.com/fb55/htmlparser2/issues/105
+// `_fallback` is internal: upstream sets it when re-sanitizing the fallback
+// markup of a discarded <iframe>, to carry the current nesting depth into the
+// recursive call.
+//
+// NOTE (fork): this fork never makes that recursive call (see the `ontext`
+// handler), so it never sets `_fallback`. The parameter is kept so that future
+// upstream merges stay small.
 
-function sanitizeHtml(html, options, _recursing) {
+function sanitizeHtml(html, options, _fallback) {
   if (html == null) {
     return '';
   }
+  const baseDepth = (_fallback && _fallback.depth) || 0;
   if (typeof html === 'number') {
     html = html.toString();
   }
@@ -120,6 +174,8 @@ function sanitizeHtml(html, options, _recursing) {
   options = Object.assign({}, sanitizeHtml.defaults, options);
   options.parser = Object.assign({}, htmlParserDefaults, options.parser);
 
+  const logger = loggerFor(options);
+
   const tagAllowed = function (name) {
     return options.allowedTags === false ||
       (options.allowedTags || []).indexOf(name) > -1;
@@ -128,7 +184,12 @@ function sanitizeHtml(html, options, _recursing) {
   // vulnerableTags
   vulnerableTags.forEach(function (tag) {
     if (tagAllowed(tag) && !options.allowVulnerableTags) {
-      console.warn(`\n\n⚠️ Your \`allowedTags\` option includes, \`${tag}\`, which is inherently\nvulnerable to XSS attacks. Please remove it from \`allowedTags\`.\nOr, to disable this warning, add the \`allowVulnerableTags\` option\nand ensure you are accounting for this risk.\n\n`);
+      logger.warn(
+        `Your \`allowedTags\` option includes \`${tag}\`, which is inherently ` +
+        'vulnerable to XSS attacks. Please remove it from `allowedTags`, or, ' +
+        'to disable this warning, add the `allowVulnerableTags` option and ' +
+        'ensure you are accounting for this risk.'
+      );
     }
   });
 
@@ -222,6 +283,15 @@ function sanitizeHtml(html, options, _recursing) {
   let transformMap;
   let skipText;
   let skipTextDepth;
+  // Browsers (with scripting enabled) parse <noscript> content as raw text up
+  // to the first `</noscript`, but htmlparser2 parses it as markup, so an end
+  // tag for an ancestor can make htmlparser2 close the <noscript> implicitly
+  // much earlier. `rawTextEnd` is the source offset where the browser ends the
+  // <noscript> being discarded, and `skipRawText` is set while htmlparser2 has
+  // already closed it but the browser has not, so that we keep discarding
+  // until we reach that offset (GHSA-x3q4-9hxx-gx8m).
+  let rawTextEnd;
+  let skipRawText;
   let addedText = false;
 
   initializeState();
@@ -231,6 +301,7 @@ function sanitizeHtml(html, options, _recursing) {
       if (options.onOpenTag) {
         options.onOpenTag(name, attribs);
       }
+      updateRawTextRegion();
 
       // If `enforceHtmlBoundary` is `true` and this has found the opening
       // `html` tag, reset the state.
@@ -238,6 +309,9 @@ function sanitizeHtml(html, options, _recursing) {
         initializeState();
       }
 
+      if (skipRawText) {
+        return;
+      }
       if (skipText) {
         skipTextDepth++;
         return;
@@ -272,13 +346,16 @@ function sanitizeHtml(html, options, _recursing) {
         }
       }
 
-      if (!tagAllowed(name) || (options.disallowedTagsMode === 'recursiveEscape' && !isEmptyObject(skipMap)) || (options.nestingLimit != null && depth >= options.nestingLimit)) {
+      if (!tagAllowed(name) || animatesUrlAttribute(name, attribs) || (options.disallowedTagsMode === 'recursiveEscape' && !isEmptyObject(skipMap)) || (options.nestingLimit != null && depth >= options.nestingLimit)) {
         skip = true;
         skipMap[depth] = true;
         if (options.disallowedTagsMode === 'discard' || options.disallowedTagsMode === 'completelyDiscard') {
           if (nonTextTagsArray.indexOf(name) !== -1) {
             skipText = true;
             skipTextDepth = 1;
+            if (frame.tag.toLowerCase() === 'noscript') {
+              rawTextEnd = findRawTextEnd('noscript', parser.endIndex + 1);
+            }
           }
         }
       }
@@ -378,6 +455,14 @@ function sanitizeHtml(html, options, _recursing) {
               }
             }
 
+            // `<meta http-equiv="refresh" content="0;url=...">` navigates to a
+            // URL embedded in `content`, so scheme check that URL too
+            // (GHSA-cv27-6wvh-8x7j). Other meta `content` values are left alone.
+            if (name === 'meta' && a.toLowerCase() === 'content' && isRefresh(attribs) && naughtyRefresh(value)) {
+              delete frame.attribs[a];
+              return;
+            }
+
             if (name === 'script' && a === 'src') {
 
               let allowed = true;
@@ -444,7 +529,7 @@ function sanitizeHtml(html, options, _recursing) {
               try {
                 let parsed = parseSrcset(value);
                 parsed.forEach(function(value) {
-                  if (naughtyHref(a, value.url)) {
+                  if (naughtyHref(name, value.url)) {
                     value.evil = true;
                   }
                 });
@@ -484,7 +569,7 @@ function sanitizeHtml(html, options, _recursing) {
               if (allowedSpecificClasses && allowedWildcardClasses) {
                 value = filterClasses(
                   value,
-                  deepmerge(allowedSpecificClasses, allowedWildcardClasses),
+                  mergeClasses(allowedSpecificClasses, allowedWildcardClasses),
                   allowedClassesGlobs
                 );
               } else {
@@ -516,7 +601,14 @@ function sanitizeHtml(html, options, _recursing) {
                   }
                 } catch (e) {
                   if (typeof window !== 'undefined') {
-                    console.warn('Failed to parse "' + name + ' {' + value + '}' + '", If you\'re running this in a browser, we recommend to disable style parsing: options.parseStyleAttributes: false, since this only works in a node environment due to a postcss dependency, More info: https://github.com/apostrophecms/sanitize-html/issues/547');
+                    logger.warn(
+                      `Failed to parse "${name} {${value}}". If you are ` +
+                      'running this in a browser, we recommend disabling ' +
+                      'style parsing with the parseStyleAttributes option, ' +
+                      'since it only works in a node environment due to a ' +
+                      'postcss dependency. More info: ' +
+                      'https://github.com/apostrophecms/sanitize-html/issues/547'
+                    );
                   }
                   delete frame.attribs[a];
                   return;
@@ -557,7 +649,8 @@ function sanitizeHtml(html, options, _recursing) {
       frame.openingTagLength = result.length - frame.tagPosition;
     },
     ontext: function(text) {
-      if (skipText) {
+      updateRawTextRegion();
+      if (skipText || skipRawText) {
         return;
       }
       const lastFrame = stack[stack.length - 1];
@@ -606,6 +699,16 @@ function sanitizeHtml(html, options, _recursing) {
         // like any other text (important to prevent XSS via entity-encoded
         // payloads such as <option>&lt;script&gt;...&lt;/script&gt;</option>).
         result += text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      // NOTE (fork): upstream 2.18.x adds an `else if` branch at this point
+      // that re-sanitizes the text of a discarded <iframe> as HTML (issue
+      // #5550), capped at eight nested iframes (GHSA-c9rx-x947-fp3h). It exists
+      // because htmlparser2 >= 11 treats <iframe> as a raw-text element.
+      // htmlparser2 10.x does not: it always parses iframe content as ordinary
+      // markup, at any nesting depth and in every disallowedTagsMode, and that
+      // markup is sanitized like the rest of the input. On 10.x upstream's
+      // branch would instead re-sanitize every decoded text chunk inside the
+      // iframe, with a recursive call per chunk and a repeated vulnerable-tag
+      // warning, so this fork leaves it out.
       } else if (!addedText) {
         const escaped = escapeHtml(text, false);
         if (options.textFilter) {
@@ -624,10 +727,24 @@ function sanitizeHtml(html, options, _recursing) {
         options.onCloseTag(name, isImplied);
       }
 
-      if (skipText) {
+      updateRawTextRegion();
+      if (skipRawText) {
+        // Still inside the browser's raw text: only close elements that were
+        // opened before the discarded region, so the output stays balanced.
+        const lastFrame = stack[stack.length - 1];
+        if (!lastFrame || lastFrame.tag !== name) {
+          return;
+        }
+      } else if (skipText) {
         skipTextDepth--;
         if (!skipTextDepth) {
           skipText = false;
+          if (rawTextEnd !== null) {
+            // htmlparser2 closed the element implicitly (e.g. an ancestor's
+            // end tag) before the browser would. Close its frame below, but
+            // keep discarding up to the browser's end tag.
+            skipRawText = true;
+          }
         } else {
           return;
         }
@@ -724,12 +841,33 @@ function sanitizeHtml(html, options, _recursing) {
 
   function initializeState() {
     result = '';
-    depth = 0;
+    depth = baseDepth;
     stack = [];
     skipMap = {};
     transformMap = {};
     skipText = false;
     skipTextDepth = 0;
+    rawTextEnd = null;
+    skipRawText = false;
+  }
+
+  // Leave the raw text region once the parser reaches the offset where the
+  // browser ends it.
+  function updateRawTextRegion() {
+    if (rawTextEnd !== null && parser.startIndex >= rawTextEnd) {
+      rawTextEnd = null;
+      skipRawText = false;
+    }
+  }
+
+  // Offset of the end tag that ends a raw text element in a browser: the
+  // first case-insensitive `</name` followed by HTML whitespace, `/` or `>`.
+  // With no such end tag the element runs to the end of the input.
+  function findRawTextEnd(tagName, from) {
+    const re = new RegExp('</' + tagName + '[\\t\\n\\f\\r />]', 'ig');
+    re.lastIndex = from;
+    const match = re.exec(html);
+    return match ? match.index : Infinity;
   }
 
   function escapeHtml(s, quote) {
@@ -766,6 +904,127 @@ function sanitizeHtml(html, options, _recursing) {
       allowedSchemes,
       allowProtocolRelative: options.allowProtocolRelative
     });
+  }
+
+  function isRefresh(attribs) {
+    return Object.keys(attribs).some(function(a) {
+      return a.toLowerCase() === 'http-equiv' &&
+        String(attribs[a]).trim().toLowerCase() === 'refresh';
+    });
+  }
+
+  // True if the `content` of a `<meta http-equiv="refresh">` must be dropped:
+  // its destination URL fails the scheme policy, or it cannot be parsed as a
+  // refresh at all (a browser would ignore it then, so nothing is lost).
+  // Extracts the URL the way the HTML standard's "shared declarative refresh
+  // steps" do, so that spelling, separator, quoting and case variations of
+  // `url=`, or no `url=` at all, all yield the URL a browser would navigate to.
+  function naughtyRefresh(content) {
+    const input = String(content);
+    const isWhitespace = function(c) {
+      return c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r';
+    };
+    let position = 0;
+    const skipWhitespace = function() {
+      while (position < input.length && isWhitespace(input[position])) {
+        position++;
+      }
+    };
+    const lowerAt = function(i) {
+      return (input[i] || '').toLowerCase();
+    };
+    skipWhitespace();
+    const timeStart = position;
+    while (position < input.length && /[0-9.]/.test(input[position])) {
+      position++;
+    }
+    if (position === timeStart) {
+      return true;
+    }
+    if (position < input.length) {
+      const c = input[position];
+      if (c !== ';' && c !== ',' && !isWhitespace(c)) {
+        return true;
+      }
+      skipWhitespace();
+      if (input[position] === ';' || input[position] === ',') {
+        position++;
+      }
+      skipWhitespace();
+    }
+    if (position >= input.length) {
+      // No URL: refreshes the current document
+      return false;
+    }
+    let url = input.slice(position);
+    let quoted = true;
+    if (lowerAt(position) === 'u') {
+      quoted = false;
+      if (lowerAt(position + 1) === 'r' && lowerAt(position + 2) === 'l') {
+        position += 3;
+        skipWhitespace();
+        if (input[position] === '=') {
+          position++;
+          skipWhitespace();
+          quoted = true;
+        }
+      }
+    }
+    if (quoted) {
+      const quote = input[position];
+      if (quote === '"' || quote === '\'') {
+        position++;
+      }
+      url = input.slice(position);
+      if (quote === '"' || quote === '\'') {
+        const end = url.indexOf(quote);
+        if (end !== -1) {
+          url = url.slice(0, end);
+        }
+      }
+    }
+    return naughtyHref('meta', url);
+  }
+
+  // True if this is an SVG SMIL animation element that animates a URL-bearing
+  // attribute, e.g. `<animate attributeName="href" values="#safe;javascript:...">`.
+  //
+  // Such an element carries no URL of its own: the browser copies the animation
+  // values into the target attribute *after* sanitization, so a `javascript:`
+  // destination reaches a live link sink without ever being scheme checked.
+  // `values` compounds this, because it is a semicolon-separated LIST of
+  // destinations: checking it as one flat URL only validates its first entry, so
+  // a leading `#safe` fragment carries the rest of the list past the policy.
+  //
+  // Re-checking each entry of each value attribute would leave the safety of the
+  // output resting on our imitation of SMIL list parsing, so we reject the
+  // animation on the strength of its target instead. Animations of attributes
+  // that are not URL sinks, such as `fill` or `opacity`, are unaffected.
+  function animatesUrlAttribute(name, attribs) {
+    // In an XML serialization a prefixed name such as `svg:animate` is the same
+    // element as `animate`, so match on the local name (GHSA-374f-7chj-9948).
+    if (svgAnimationTags.indexOf(localPart(name)) === -1) {
+      return false;
+    }
+    const schemeCheckedAttributes = options.allowedSchemesAppliedToAttributes || [];
+    return Object.keys(attribs || {}).some(function(attributeName) {
+      if (localPart(attributeName) !== 'attributename') {
+        return false;
+      }
+      const target = (attribs[attributeName] || '').trim().toLowerCase();
+      // The target may be namespace prefixed (`xlink:href`). Which prefixes are
+      // in scope depends on the document, so consider the local name too.
+      const localName = target.slice(target.lastIndexOf(':') + 1);
+      return alwaysUrlAttributes.indexOf(localName) !== -1 ||
+        schemeCheckedAttributes.indexOf(target) !== -1 ||
+        schemeCheckedAttributes.indexOf(localName) !== -1;
+    });
+  }
+
+  // Lowercased name with any namespace prefix removed.
+  function localPart(name) {
+    const lower = name.toLowerCase();
+    return lower.slice(lower.lastIndexOf(':') + 1);
   }
 
   function parseUrl(value) {
@@ -816,7 +1075,7 @@ function sanitizeHtml(html, options, _recursing) {
 
     // Merge global and tag-specific styles into new AST.
     if (allowedStyles[astRules.selector] && allowedStyles['*']) {
-      selectedRule = deepmerge(
+      selectedRule = mergeStyles(
         allowedStyles[astRules.selector],
         allowedStyles['*']
       );

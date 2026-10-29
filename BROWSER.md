@@ -118,8 +118,8 @@ For older browser support, you may need to run the builds through additional tra
 
 ## Bundle Size
 
-- Production UMD: ~188 KB (~67 KB gzipped)
-- Production ES: ~255 KB (~74 KB gzipped)
+- Production UMD: ~243 KB (~97 KB gzipped)
+- Production ES: ~331 KB (~107 KB gzipped)
 - Development builds are larger and unminified for debugging
 
 The bundle includes all necessary dependencies (htmlparser2, postcss, etc.) so it works standalone in browsers.

@@ -2,6 +2,68 @@
 
 <a href="https://apostrophecms.com/"><img src="https://raw.githubusercontent.com/apostrophecms/sanitize-html/main/logos/logo-box-madefor.png" align="right" /></a>
 
+## About this fork: `@mdaemon/sanitize-html`
+
+`@mdaemon/sanitize-html` is MDaemon's fork of [sanitize-html](https://github.com/apostrophecms/apostrophe/tree/main/packages/sanitize-html) by Apostrophe Technologies. The fork section ends at "Fork-specific documentation" below. The rest of this README is upstream's documentation, unchanged, and applies to this package too. Where it says to install or import `sanitize-html`, use `@mdaemon/sanitize-html`.
+
+### Why this fork exists
+
+- **Browser build.** Since 2.0, upstream no longer publishes a build that runs in the browser as-is. You have to bundle it into your own project. This fork's main purpose is to keep publishing one: every release includes a UMD bundle you can load with a `<script>` tag and an ES module bundle, with all dependencies included.
+- **CommonJS.** Starting with 2.17.6, upstream depends on `htmlparser2` 12. That version is ESM-only, and it makes upstream require Node.js 22.12 or later. This fork stays on `htmlparser2` 10.x, so it can still be loaded with `require()` and bundled the same way as before.
+
+### What stays the same
+
+- **API and docs.** The API, options and defaults are upstream's, so the documentation below applies unchanged.
+- **Version numbers.** They match the upstream release whose code the fork contains. `@mdaemon/sanitize-html@2.18.1` is upstream 2.18.1.
+- **Security fixes.** Each sync brings in all of upstream's security fixes. Where the parser version matters, the fix is adapted for `htmlparser2` 10.x and tested against the published attack payloads.
+
+### What is different
+
+| | `sanitize-html` (upstream) | `@mdaemon/sanitize-html` (this fork) |
+|---|---|---|
+| Browser build | None. Bundle it yourself | `dist/sanitize-html.umd.js` (global `sanitizeHtml`) and `dist/sanitize-html.es.js`, picked up through the `browser` and `module` fields |
+| TypeScript types | Community package `@types/sanitize-html` | Included (`index.d.ts`) |
+| HTML parser | `htmlparser2` ^12 (ESM-only) | `htmlparser2` ^10.1 (CommonJS) |
+| Node.js requirement | `>=22.12.0` | No `engines` restriction |
+| Discarded `<iframe>` content | Re-sanitized by an extra recursive pass (2.18.0+) | Not needed. The parser already treats iframe content as markup |
+
+### Output differences caused by the parser version
+
+The two parser versions disagree about which elements contain raw text. `htmlparser2` 12 treats `iframe`, `noembed`, `noframes` and `plaintext` as raw-text elements, and it decodes entities inside `textarea`. `htmlparser2` 10.x does neither of these. As a result, a few inputs, mostly malformed or unusual markup around those elements, give different output from upstream:
+
+| Input | Options | Upstream | This fork |
+|---|---|---|---|
+| `<textarea></textarea/><img src=x onerror=alert(1)>` | `allowedTags: ['textarea']` | `<textarea></textarea>` | `<textarea>&lt;/textarea/&gt;&lt;img src=x onerror=alert(1)&gt;</textarea>` |
+| `<iframe><p>fb</p></iframe>` | `allowedTags: ['iframe', 'p']` | `<iframe>&lt;p&gt;fb&lt;/p&gt;</iframe>` | `<iframe><p>fb</p></iframe>` |
+| `<iframe><p>fb</p></iframe>` | `disallowedTagsMode: 'completelyDiscard'` | *(empty)* | `<p>fb</p>` |
+| `<iframe><b>x</b></iframe>` | `disallowedTagsMode: 'escape'` | `&lt;iframe&gt;&lt;b&gt;x&lt;/b&gt;&lt;/iframe&gt;` | `&lt;iframe&gt;<b>x</b>&lt;/iframe&gt;` |
+| `<a href="/1">1<a href="/2">2</a>3</a>` | defaults | `<a href="/1">1</a><a href="/2">2</a>3` | `<a href="/1">1<a href="/2">2</a>3</a>` |
+
+These differences are all safe. In every case the fork's output contains only markup the allowlist permits, so where it differs from upstream, it differs in *form*, not in what it lets through. For each upstream security advisory, the fork's output for the published attack payloads is parsed again with a browser-grade HTML parser to confirm that nothing executable survives. Tests whose expected output differs from upstream's are marked `NOTE (fork)` in `test/test.js`, and code that differs is marked `NOTE (fork)` in `index.js`.
+
+### Install and use
+
+```bash
+npm install @mdaemon/sanitize-html
+```
+
+```javascript
+// Node.js or a bundler (bundlers use the ES build automatically)
+const sanitizeHtml = require('@mdaemon/sanitize-html');
+```
+
+```html
+<!-- Browser, no bundler: defines a global sanitizeHtml -->
+<script src="node_modules/@mdaemon/sanitize-html/dist/sanitize-html.umd.js"></script>
+```
+
+### Fork-specific documentation
+
+- [BROWSER.md](BROWSER.md): the browser builds, how to load them, and bundle sizes.
+- [CHANGELOG.md](CHANGELOG.md): the fork notes at the top record every sync, each fork divergence and its reasoning, and upgrade notes. The upstream changelog follows.
+
+---
+
 sanitize-html provides a simple HTML sanitizer with a clear API.
 
 sanitize-html is tolerant. It is well suited for cleaning up HTML fragments such as those created by CKEditor and other rich text editors. It is especially handy for removing unwanted CSS when copying and pasting from Word.
@@ -29,6 +91,8 @@ Additionally, `sanitize-html` escapes _ALL_ text content - this means that amper
 sanitize-html is intended for use with Node.js and supports Node 10+. All of its npm dependencies are pure JavaScript. sanitize-html is built on the excellent `htmlparser2` module.
 
 ### Regarding TypeScript
+
+> **Fork note:** `@mdaemon/sanitize-html` includes its own declarations in `index.d.ts`, so `@types/sanitize-html` is not needed.
 
 sanitize-html is not written in TypeScript and there is no plan to directly support it. There is a community supported typing definition, [`@types/sanitize-html`](https://www.npmjs.com/package/@types/sanitize-html), however.
 ```bash
@@ -61,6 +125,8 @@ or
 ```
 yarn add sanitize-html
 ```
+
+> **Fork note:** `@mdaemon/sanitize-html` *does* include ready-to-use browser builds. Load `dist/sanitize-html.umd.js` with a `<script>` tag to get a global `sanitizeHtml`, or import `dist/sanitize-html.es.js`. Bundlers pick these up through the `browser` and `module` fields in `package.json`. In the browser, set `parseStyleAttributes: false` if you allow `style` attributes. See [BROWSER.md](BROWSER.md).
 
 The primary change in the 2.x version of sanitize-html is that it no longer includes a build that is ready for browser use. Developers are expected to include sanitize-html in their project builds (e.g., webpack) as they would any other dependency. So while sanitize-html is no longer ready to link to directly in HTML, developers can now more easily process it according to their needs.
 
@@ -696,6 +762,19 @@ And you can forbid the use of protocol-relative URLs (starting with `//`) to acc
 allowProtocolRelative: false
 ```
 
+### SVG animations of URL attributes are discarded
+
+For security reasons, if your `allowedTags` includes the SVG animation elements (`animate`, `animateColor`, `animateMotion`, `animateTransform` and `set`), note that an animation which targets a URL attribute is always discarded:
+
+```html
+<!-- Discarded: this would set the link's href to javascript: after sanitization -->
+<animate attributeName="href" values="#safe;javascript:alert(1)" dur=".01s" fill="freeze">
+```
+
+An animation element carries no URL itself. It names the attribute it animates with `attributeName` and supplies the new value in `values`, `from`, `to` or `by`, which the browser copies into the target attribute after sanitization. Scheme checking those values is not sufficient, because `values` is a semicolon-separated *list* of destinations, so we discard the animation instead whenever `attributeName` selects `href`, `xlink:href` or any other attribute listed in `allowedSchemesAppliedToAttributes`.
+
+Animations of attributes that are not URLs, such as `fill` or `opacity`, are unaffected.
+
 ### Discarding the entire contents of a disallowed tag
 
 Normally, with a few exceptions, if a tag is not allowed, all of the text within it is preserved, and so are any allowed tags within it.
@@ -796,6 +875,20 @@ nestingLimit: 6
 ```
 
 This will prevent the user from nesting tags more than 6 levels deep. Tags deeper than that are stripped out exactly as if they were disallowed. Note that this means text is preserved in the usual ways where appropriate.
+
+### Routing warnings to your own logger
+
+sanitize-html writes its own diagnostics - the vulnerable tag notice above, and the style parsing notice in the browser - to the console. If your application has a logging pipeline of its own, pass any console-shaped object as the `logger` option and they are delivered to it instead:
+
+```javascript
+sanitizeHtml(dirty, {
+  logger: myLogger // an object with debug, info, warn and error methods
+});
+```
+
+Any of the four methods that your object does not provide falls back to the console, and without the option at all the console is still the destination, exactly as before.
+
+This matters for applications that write structured logs: a raw `console.warn` bypasses their filtering and formatting, and puts unparseable text on a stream that is expected to be one JSON object per line.
 
 ### Advanced filtering
 

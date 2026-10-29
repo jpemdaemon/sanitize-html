@@ -1,7 +1,7 @@
 {
   "name": "@mdaemon/sanitize-html",
-  "version": "2.17.6",
-  "description": "A fork of sanitize-html with some modifications for use in MDaemon",
+  "version": "2.18.1",
+  "description": "sanitize-html with a ready-to-use browser build (UMD and ES modules) and TypeScript types, kept on CommonJS htmlparser2 10.x. Tracks upstream sanitize-html releases.",
   "main": "index.js",
   "types": "index.d.ts",
   "browser": "dist/sanitize-html.umd.js",
@@ -28,18 +28,20 @@
     "html",
     "parser",
     "sanitizer",
-    "sanitize"
+    "sanitize",
+    "xss",
+    "umd",
+    "browser"
   ],
   "author": "Apostrophe Technologies, Inc.",
   "license": "MIT",
   "dependencies": {
-    "deepmerge": "^4.2.2",
     "escape-string-regexp": "^4.0.0",
     "htmlparser2": "^10.1.0",
-    "is-plain-object": "^5.0.0",
-    "launder": "^1.7.1",
+    "is-plain-object": "^5.1.0",
+    "launder": "^1.7.2",
     "parse-srcset": "^1.0.2",
-    "postcss": "^8.5.6"
+    "postcss": "^8.5.27"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.6",

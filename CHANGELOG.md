@@ -2,6 +2,15 @@
 
 > **@mdaemon fork notes**
 >
+> - **2.18.1 (fork sync):** Synced source (`index.js`, tests, README) to upstream sanitize-html 2.18.1, which takes in 2.17.7, 2.18.0 and 2.18.1, still on `htmlparser2` ^10.1.0. This **removes the `deepmerge` dependency** (GHSA-gcqx-w48m-w2h4, "deepmerge mergeObject() allows prototype poisoning of returned objects"; no fixed `deepmerge` release exists). Upstream replaced it with local `mergeClasses`/`mergeStyles` helpers. The previous `dist/` bundles had `deepmerge` compiled in, so browser consumers are affected as well, and the rebuilt bundles no longer contain it. `npm audit --omit=dev` now reports 0 vulnerabilities. `deepmerge` is still in the dev tree as a build-time dependency of `@rollup/plugin-node-resolve` and is not shipped. Also raised the dependency floors to match upstream: `is-plain-object` ^5.1.0, `launder` ^1.7.2, `postcss` ^8.5.27. Added the new `logger` option to `index.d.ts`. README gains an "About this fork" section explaining why the fork exists and how it differs from upstream, with examples of the output differences caused by the parser version. The `package.json` description and keywords now say the same. See "fork divergence in 2.18.1" below.
+>
+>   **Upgrading from 2.17.6:**
+>   - With default options, output is unchanged.
+>   - Check that `allowedSchemesByTag.img` is the policy you want for `srcset`, because it now applies there too.
+>   - If `noscript` is in `nonTextTags`, an unclosed `<noscript>` now discards the rest of the input.
+>   - `<meta http-equiv="refresh">` loses `content` when its URL fails the scheme check.
+>   - SVG animation elements that retarget `href` are dropped.
+>   - The warning messages are now single-line and reworded. Update anything that matches the old text, or pass the new `logger` option.
 > - **2.17.6 (fork sync):** Synced source (`index.js`, tests) to upstream sanitize-html 2.17.6, **excluding the `htmlparser2` 12.x upgrade**. Upstream moved to `htmlparser2` ^12.0.0, which is ESM-only (from v11) and therefore forces `engines.node >= 22.12.0`; this fork deliberately stays on `htmlparser2` ^10.1.0 to remain CommonJS-compatible. Both of upstream's 2.17.6 security fixes are included and verified — see "fork divergence" below. Also upgraded devDependencies `mocha` to ^11.8.0 and `sinon` to ^22.1.0, with npm `overrides` pinning `serialize-javascript` ^7.0.7 and `diff` ^9.0.0 to clear dev-only advisories.
 > - **2.17.5 (fork sync):** Synced source (`index.js`, tests) to upstream sanitize-html 2.17.5 from the ApostropheCMS monorepo, while retaining this fork's browser build (UMD/ES bundles via Vite), `index.d.ts`, and `src/browser.js`. Added `launder` as a dependency (required by upstream since 2.17.4 for `naughtyHref`) and bumped `htmlparser2` to ^10.1.0.
 > - **(earlier fork entry):** Fix to vulnerabilities found in postcss's dependency "nanoid" by upgrading postcss to 8.5.6.
@@ -13,6 +22,70 @@
 > The escaping itself is adapted, because the two parser versions differ. Upstream escapes `textarea` with `escapeHtml()` since `htmlparser2` >= 11 *decodes* entities inside RCDATA elements. On `htmlparser2` 10.x neither `textarea` nor `xmp` has its entities decoded, so both receive the raw-text treatment here — angle brackets only, leaving `&` untouched. Applying upstream's `textarea` branch verbatim on 10.x would double-encode (`&lt;` to `&amp;lt;`).
 >
 > Verified: all 17 published attack payloads from both advisories produce output containing no live element when the sanitized result is re-parsed with `parse5` (spec-compliant, browser-grade). The same check against the pre-fix `index.js` shows 15 of 17 producing live `<img onerror>` / `<script>` / `<iframe src=javascript:>` / `<svg onload>`, confirming this fork was genuinely affected and is now fixed. Because expected output differs from upstream's wherever the parser version is observable, the ported tests assert this fork's exact (inert) output; those cases are commented `NOTE (fork)` in `test/test.js`.
+>
+> **Fork divergence in 2.18.1: discarded `<iframe>` fallback**
+>
+> Upstream 2.18.0 added an `ontext` branch that re-sanitizes the content of a discarded `<iframe>` as HTML, and 2.18.1 capped that recursion at eight nested iframes (GHSA-c9rx-x947-fp3h). The branch exists because `htmlparser2` >= 11 tokenizes `<iframe>` as a raw-text element. `htmlparser2` 10.x does not: it always parses iframe content as ordinary markup, which is sanitized like the rest of the input. That gives upstream's result for a discarded iframe in `discard` mode. On 10.x the branch would instead run once for every entity-split text chunk inside the iframe. Output stayed inert, but each chunk cost a recursive `sanitizeHtml` call (several times slower on entity-heavy content) and repeated the vulnerable-tag warning. This fork leaves the branch out. The fork's iframe output was already like this in 2.17.6, but it differs from upstream 2.18.1 in a few cases:
+>
+> - Fallback nested more than eight iframes deep is still sanitized markup, where upstream escapes it as text.
+> - In `completelyDiscard` mode the sanitized fallback is kept, where upstream drops it.
+> - In `escape` mode the fallback stays sanitized markup, where upstream escapes it.
+> - In an allowed iframe, the fallback is kept as sanitized elements.
+>
+> None of these lets through markup the allowlist forbids. All of upstream's iframe fallback and `nestingLimit` tests pass unchanged, and GHSA-c9rx-x947-fp3h does not apply, since without the recursive call there is no recursion to bound.
+
+## 2.18.1 (2026-10-14)
+
+### Changes
+
+- Remove the `deepmerge` dependency, which was used only to combine tag-specific and `*` (all tags) entries in `allowedClasses` and `allowedStyles`. That is now done by a few lines of code within sanitize-html.
+
+  This is not a fix for a vulnerability in sanitize-html. Security scanners such as Snyk now report [CVE-2026-93753](https://security.snyk.io/vuln/SNYK-JS-DEEPMERGE-19964053) in `deepmerge`, which can affect applications that merge untrusted objects, such as parsed JSON request bodies. sanitize-html only ever merged the developer's own configuration, never anything taken from the HTML being sanitized, so it was not exploitable through sanitize-html. Since we needed only a small part of what `deepmerge` does, we removed the dependency so that these reports no longer appear for sanitize-html users.
+
+### Security
+
+- Since 2.18.0, the fallback markup of a discarded `<iframe>` was re-sanitized by a recursive call with no limit, one level per nested unclosed `<iframe>`. A few kilobytes of crafted input could throw `RangeError: Maximum call stack size exceeded` with the default options, and the `nestingLimit` option was not enforced across the fallback because each nested call started counting from zero. The fallback of a discarded `<iframe>` is still sanitized and kept, but only up to eight nested `<iframe>` elements (deeper fallback is escaped as text, as before 2.18.0), and the current nesting depth now carries into the nested call so `nestingLimit` applies to the whole output. Only 2.18.0 was affected, and the exception is thrown synchronously, so applications that catch errors from `sanitizeHtml` only lost the affected request (CWE-674, GHSA-c9rx-x947-fp3h).
+
+  Thanks to [hkmj19](https://github.com/hkmj19), [JohnBeckley](https://github.com/JohnBeckley), and [amikhailovstiltsoft](https://github.com/amikhailovstiltsoft) for reporting the vulnerability.
+
+> **Fork note:** the `deepmerge` removal above also clears GHSA-gcqx-w48m-w2h4 for this fork, including its browser bundles. The `<iframe>` fallback security fix does not apply here, because this fork does not include the recursive fallback code. See the fork notes at the top of this file.
+
+## 2.18.0 (2026-09-30)
+
+### Adds
+
+- Added a `logger` option: pass any console-shaped object, with `debug`, `info`, `warn` and `error` methods, and sanitize-html's own diagnostics are delivered to it rather than to the console, so an application with a logging pipeline of its own can route them. Missing methods, and no option at all, fall back to the console. Those messages also lost their decorative line breaks and warning icon, so each is now a single line of text; their wording is otherwise unchanged.
+
+### Fixes
+
+- `allowedSchemesByTag` is now applied to `srcset` and `imagesrcset` URLs. Previously the per-tag lookup used the attribute name instead of the tag name, so these attributes always fell back to the global `allowedSchemes` and ignored a tag-specific scheme allowlist. Thanks to
+  [spokodev](https://github.com/spokodev) for the fix.
+- Starting in version 2.17.6, `sanitize-html` began escaping any markup preserved inside a disallowed iframe tag, which was a change
+  in behavior due to an upstream change in `htmlparser2`. This fix ensures such "fallback markup" is preserved without escaping, but also
+  fully sanitized according to the same rules as the original input. Thanks to [sumitjhacodes](https://github.com/sumitjhacodes) for
+  the fix.
+
+### Security
+
+- When `meta` was allowed together with its `http-equiv` and `content` attributes, the destination URL of a `<meta http-equiv="refresh" content="0;url=...">` was never checked against `allowedSchemes`, because it is embedded in `content` rather than being an attribute of its own. So `javascript:`, `data:` and other disallowed destinations passed through. The refresh URL is now extracted the way browsers do it, allowing for the different spellings, separators, quoting and letter case of `url=`, and checked against `allowedSchemes` (or `allowedSchemesByTag.meta`). If it is rejected, or the content cannot be parsed as a refresh, the `content` attribute is removed. `content` on other `meta` elements is unchanged. The default configuration does not allow `meta` and was not affected (CWE-79, CWE-601, GHSA-cv27-6wvh-8x7j).
+
+  Thanks to [adrbogacz](https://github.com/adrbogacz) for reporting the vulnerability.
+
+- When `noscript` is listed in `nonTextTags`, the discarded region could end too early. Browsers with scripting enabled treat `<noscript>` content as raw text up to the first `</noscript>`, but the underlying parser treats it as markup, so an end tag for an enclosing element inside `<noscript>` closed it implicitly and the rest of its content was emitted as ordinary sanitized markup. The discard region now continues until the point where a browser would end the `<noscript>` element, while implied closes of other `nonTextTags` such as `<option>` behave as before (CWE-79, CWE-436, GHSA-x3q4-9hxx-gx8m).
+
+  Thanks to [joaquiniglesiaslug](https://github.com/joaquiniglesiaslug) for reporting the vulnerability.
+
+- The check that drops SVG animation elements (`animate`, `animateColor`, `animateMotion`, `animateTransform`, `set`) when they retarget a URL attribute such as `href` compared the full tag name, so a namespace-prefixed spelling like `svg:animate` was not recognized when such tags were allowed (for example with `allowedTags: false`). In XML serializations such as XHTML or standalone SVG, the prefixed element is a real animation element and could retarget a link to a `javascript:` URL after sanitization. The element and `attributeName` are now matched by their local names, ignoring any prefix (CWE-79, CWE-184, GHSA-374f-7chj-9948).
+
+  Thanks to [Kai Aizen (SnailSploit)](https://github.com/SnailSploit) for reporting the vulnerability.
+
+> **Fork note:** the iframe "fallback markup" fix above is not ported, because `htmlparser2` 10.x already keeps and sanitizes that markup, so this fork has the same behavior without it. The `logger` option, the `allowedSchemesByTag` fix for `srcset`, and all three security fixes are included.
+
+## 2.17.7 (2026-08-13)
+
+### Security
+
+- Fixed an XSS / URL scheme policy bypass affecting configurations that allow the SVG animation elements (`animate`, `animateColor`, `animateMotion`, `animateTransform` or `set`) together with `attributeName` and one of the animation value attributes. The default configuration was not affected, as these elements are not in the default `allowedTags`. `apostrophecms` was not affected. Thanks to [koyokr](https://github.com/koyokr) for responsibly disclosing the vulnerability (GHSA-g8qq-57p8-ggw5).
 
 ## 2.17.6 (2026-07-10)
 
